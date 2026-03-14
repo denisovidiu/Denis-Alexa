@@ -219,4 +219,26 @@ public enum DemarkError: LocalizedError, Sendable {
             "Failed to initialize WKWebView"
         }
     }
+
+    /// Suggested recovery action for the error.
+    public var recoverySuggestion: String? {
+        switch self {
+        case .jsEnvironmentInitializationFailed:
+            "Restart the application or try reinitializing the converter"
+        case .libraryNotFound, .libraryLoadingFailed, .bundleResourceMissing:
+            "Verify the package resources are correctly included in the bundle"
+        case .jsContextCreationFailed:
+            "Ensure sufficient memory is available and try again"
+        case .turndownServiceCreationFailed:
+            "Check that the Turndown library loaded correctly"
+        case .conversionFailed, .jsException:
+            "Verify the HTML input is well-formed and try again"
+        case .emptyResult:
+            "Verify HTML input contains convertible content"
+        case .invalidInput:
+            "Check the HTML input and options for validity"
+        case .webViewInitializationFailed:
+            "Ensure WebKit is available on this platform and try again"
+        }
+    }
 }

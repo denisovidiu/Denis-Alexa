@@ -8,108 +8,6 @@
 import Foundation
 import os.log
 
-/// Main conversion runtime that routes between different engines
-@MainActor
-final class ConversionRuntime {
-    // MARK: - Properties
-
-    private let logger = Logger(subsystem: "com.demark", category: "conversion")
-    private let turndownRuntime = TurndownRuntime()
-    private let htmlToMdRuntime = HTMLToMdRuntime()
-
-    // MARK: - Public Methods
-
-    /// Convert HTML to Markdown with optional configuration
-    func htmlToMarkdown(_ html: String, options: DemarkOptions = .default) async throws -> String {
-        logger.info(
-            "Starting HTML to Markdown conversion with \(options.engine.rawValue) engine"
-        )
-        logger.info("Input length: \(html.count)")
-
-        // Reject empty input early to keep error semantics consistent across engines.
-        if html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw DemarkError.emptyResult
-        }
-
-        // Route to appropriate engine
-        let rawMarkdown: String
-        switch options.engine {
-        case .turndown:
-            do {
-                rawMarkdown = try await turndownRuntime.convert(html, options: options)
-            } catch {
-                logger.warning("Turndown failed (\(error)); falling back to html-to-md")
-                let fallback = DemarkOptions(
-                    engine: .htmlToMd,
-                    headingStyle: options.headingStyle,
-                    bulletListMarker: options.bulletListMarker,
-                    codeBlockStyle: options.codeBlockStyle,
-                    skipTags: options.skipTags,
-                    ignoreTags: options.ignoreTags,
-                    emptyTags: options.emptyTags
-                )
-                rawMarkdown = try await htmlToMdRuntime.convert(html, options: fallback)
-            }
-        case .htmlToMd:
-            rawMarkdown = try await htmlToMdRuntime.convert(html, options: options)
-        }
-
-        return normalizeMarkdown(rawMarkdown, bulletMarker: options.bulletListMarker)
-    }
-
-    // MARK: - Normalization helpers
-
-    /// Normalize list markers to match expectations in tests (single space after marker)
-    /// without disturbing code blocks or other content.
-    private func normalizeMarkdown(_ markdown: String, bulletMarker: String) -> String {
-        guard bulletMarker.count == 1, let bulletMarker = bulletMarker.first, "-+*".contains(bulletMarker) else {
-            return markdown
-        }
-
-        // Normalize unordered list markers (html-to-md currently always uses '*') and spacing,
-        // while avoiding fenced code blocks and thematic breaks.
-        guard let listItemRegex = try? NSRegularExpression(pattern: "^( {0,3})[*+\\-]\\s+(\\S)") else {
-            return markdown
-        }
-
-        var inFencedCodeBlock = false
-        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
-        let normalized = lines.map { line -> String in
-            let rawLine = String(line)
-
-            let trimmedLeft = rawLine.drop(while: { $0 == " " || $0 == "\t" })
-            if trimmedLeft.hasPrefix("```") || trimmedLeft.hasPrefix("~~~") {
-                inFencedCodeBlock.toggle()
-                return rawLine
-            }
-
-            guard !inFencedCodeBlock else {
-                return rawLine
-            }
-
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            let compact = trimmed.filter { $0 != " " && $0 != "\t" }
-            if compact.count >= 3,
-               let first = compact.first,
-               "-*_".contains(first),
-               compact.allSatisfy({ $0 == first })
-            {
-                return rawLine
-            }
-
-            let range = NSRange(rawLine.startIndex ..< rawLine.endIndex, in: rawLine)
-            return listItemRegex.stringByReplacingMatches(
-                in: rawLine,
-                options: [],
-                range: range,
-                withTemplate: "$1\(bulletMarker) $2"
-            )
-        }
-
-        return normalized.joined(separator: "\n")
-    }
-}
-
 /// Service for converting HTML content to Markdown format.
 ///
 /// Demark provides:
@@ -118,7 +16,6 @@ final class ConversionRuntime {
 /// - Background thread conversion using JavaScriptCore (html-to-md)
 /// - Real browser DOM environment for complex HTML (Turndown)
 /// - Fast string-based parsing for valid HTML (html-to-md)
-/// - Native HTML parsing support
 /// - Async/await interface
 /// - Cross-platform support for all Apple platforms
 ///
@@ -139,14 +36,14 @@ final class ConversionRuntime {
 public final class Demark {
     // MARK: - Properties
 
-    private let conversionRuntime: ConversionRuntime
+    private let logger = Logger(subsystem: "com.demark", category: "conversion")
+    private let turndownRuntime = TurndownRuntime()
+    private let htmlToMdRuntime = HTMLToMdRuntime()
 
     // MARK: - Lifecycle
 
     /// Create a new Demark converter instance.
-    public init() {
-        conversionRuntime = ConversionRuntime()
-    }
+    public init() {}
 
     // MARK: - Public Methods
 
@@ -186,7 +83,7 @@ public final class Demark {
     /// - `.jsEnvironmentInitializationFailed`: JavaScript runtime setup failed
     /// - `.libraryNotFound`: Required JavaScript library not found
     /// - `.conversionFailed`: The conversion process encountered an error
-    /// - `.emptyResult`: Valid HTML produced empty Markdown
+    /// - `.emptyResult`: Input HTML was empty or produced empty Markdown
     ///
     /// ## See Also
     ///
@@ -194,6 +91,80 @@ public final class Demark {
     /// - `ConversionEngine`: Available conversion engines
     /// - `DemarkError`: Error types that can be thrown during conversion
     public func convertToMarkdown(_ html: String, options: DemarkOptions = DemarkOptions()) async throws -> String {
-        try await conversionRuntime.htmlToMarkdown(html, options: options)
+        logger.info("Starting HTML to Markdown conversion with \(options.engine.rawValue) engine")
+        logger.info("Input length: \(html.count)")
+
+        // Reject empty input early to keep error semantics consistent across engines.
+        if html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw DemarkError.emptyResult
+        }
+
+        let rawMarkdown: String
+        switch options.engine {
+        case .turndown:
+            do {
+                rawMarkdown = try await turndownRuntime.convert(html, options: options)
+            } catch {
+                logger.warning("Turndown failed (\(error)); falling back to html-to-md")
+                var fallbackOptions = options
+                fallbackOptions.engine = .htmlToMd
+                rawMarkdown = try await htmlToMdRuntime.convert(html, options: fallbackOptions)
+            }
+        case .htmlToMd:
+            rawMarkdown = try await htmlToMdRuntime.convert(html, options: options)
+        }
+
+        return normalizeMarkdown(rawMarkdown, bulletMarker: options.bulletListMarker)
+    }
+
+    // MARK: - Private
+
+    /// Normalize list markers to match expectations (single space after marker)
+    /// without disturbing code blocks or other content.
+    private func normalizeMarkdown(_ markdown: String, bulletMarker: String) -> String {
+        guard bulletMarker.count == 1, let bulletCharacter = bulletMarker.first, "-+*".contains(bulletCharacter) else {
+            return markdown
+        }
+
+        // Normalize unordered list markers (html-to-md currently always uses '*') and spacing,
+        // while avoiding fenced code blocks and thematic breaks.
+        guard let listItemRegex = try? NSRegularExpression(pattern: "^( {0,3})[*+\\-]\\s+(\\S)") else {
+            return markdown
+        }
+
+        var inFencedCodeBlock = false
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        let normalized = lines.map { line -> String in
+            let rawLine = String(line)
+
+            let trimmedLeft = rawLine.drop(while: { $0 == " " || $0 == "\t" })
+            if trimmedLeft.hasPrefix("```") || trimmedLeft.hasPrefix("~~~") {
+                inFencedCodeBlock.toggle()
+                return rawLine
+            }
+
+            guard !inFencedCodeBlock else { return rawLine }
+
+            // Skip thematic breaks (e.g. "---", "***", "___")
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            let compact = trimmed.filter { $0 != " " && $0 != "\t" }
+            if compact.count >= 3,
+               let first = compact.first,
+               "-*_".contains(first),
+               compact.allSatisfy({ $0 == first })
+            {
+                return rawLine
+            }
+
+            let range = NSRange(rawLine.startIndex ..< rawLine.endIndex, in: rawLine)
+            return listItemRegex.stringByReplacingMatches(
+                in: rawLine,
+                options: [],
+                range: range,
+                withTemplate: "$1\(bulletCharacter) $2"
+            )
+        }
+
+        return normalized.joined(separator: "\n")
     }
 }
